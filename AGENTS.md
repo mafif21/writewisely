@@ -25,41 +25,47 @@ writewisely/
 ├── docs/                     # project docs
 │   ├── project-brief.md
 │   ├── data-design.md
-│   └── api-conventions.md
+│   ├── api-conventions.md
+│   ├── roadmap.md
+│   └── tasks/                # unit-of-work specs (01-scaffold.md, …)
 │
 ├── server/                   # Go + Fiber backend
 │   ├── cmd/
 │   │   └── api/
 │   │       └── main.go               # entrypoint: config, wiring, start Fiber
 │   ├── internal/                     # not importable from outside the module
-│   │   ├── config/
-│   │   │   └── config.go             # env loading
-│   │   ├── domain/                   # entities + interfaces, framework-free
-│   │   │   ├── submission.go
-│   │   │   ├── attempt.go
-│   │   │   ├── evaluation.go
-│   │   │   └── evaluator.go          # Evaluator interface
-│   │   ├── handler/                  # Fiber handlers (HTTP only) + swag annotations
-│   │   │   ├── submission_handler.go
-│   │   │   ├── evaluation_handler.go
-│   │   │   └── router.go
-│   │   ├── service/                  # business logic
-│   │   │   ├── submission_service.go
-│   │   │   ├── evaluation_service.go
-│   │   │   └── repetition/
-│   │   │       └── detector.go       # deterministic repetition detection
-│   │   ├── repository/               # Postgres access (SQL only here)
-│   │   │   ├── submission_repo.go
-│   │   │   ├── attempt_repo.go
-│   │   │   └── evaluation_repo.go
-│   │   └── adapter/
-│   │       └── anthropic/            # Claude impl of Evaluator
-│   │           ├── client.go
-│   │           ├── prompts.go        # band descriptors + few-shot calibration
-│   │           └── schema.go         # structured-output parse + validate
+│   │   ├── feature/                  # business modules (package-by-feature)
+│   │   │   ├── submission/
+│   │   │   │   ├── handler.go         # Fiber handlers + swaggo annotations (HTTP only)
+│   │   │   │   ├── service.go         # business logic
+│   │   │   │   ├── repository.go      # Postgres access (+ persistence struct / DAO if DB shape differs)
+│   │   │   │   ├── dto.go             # API request/response structs (json tags)
+│   │   │   │   ├── model.go           # domain entity
+│   │   │   │   └── service_test.go    # unit tests — colocated
+│   │   │   └── evaluation/
+│   │   │       ├── service.go         # orchestrates scoring + repetition
+│   │   │       ├── repository.go
+│   │   │       ├── evaluator.go       # Evaluator interface — defined where it is consumed
+│   │   │       ├── repetition.go      # deterministic repetition detector
+│   │   │       ├── dto.go
+│   │   │       ├── model.go
+│   │   │       └── repetition_test.go
+│   │   ├── adapter/
+│   │   │   └── anthropic/            # implements evaluation.Evaluator (Claude); imports evaluation
+│   │   │       ├── client.go
+│   │   │       ├── prompts.go        # band descriptors + few-shot calibration
+│   │   │       └── schema.go         # structured-output parse + validate
+│   │   ├── platform/                 # shared infrastructure (framework/IO)
+│   │   │   ├── config/               # env loading
+│   │   │   ├── database/             # pgxpool setup
+│   │   │   └── server/               # Fiber app, router, middleware, health endpoint
+│   │   └── constant/                 # shared constants, one file per topic
+│   │       ├── health.go
+│   │       ├── apierror.go           # error-code strings
+│   │       └── enum.go               # task_type / chart_mode / prompt_source values
 │   ├── docs/                         # swag-GENERATED OpenAPI (docs.go, swagger.json/yaml) — do not edit by hand
 │   ├── migrations/                   # 0001_init.up.sql / .down.sql
-│   ├── pkg/                          # optional shared utils
+│   ├── test/                         # integration / e2e tests ONLY (unit tests stay colocated)
 │   ├── .env.example
 │   ├── go.mod
 │   └── go.sum
@@ -96,7 +102,7 @@ Two top-level app folders: **`server/`** and **`client/`**. Keep them independen
 
 ## 3. 🔒 Golden rules (hard constraints — never violate)
 
-1. **Vendor abstraction.** All LLM calls go through a Go `Evaluator` interface. No Anthropic SDK types leak outside the `anthropic` adapter package. Business logic depends on the interface, never on the vendor.
+1. **Vendor abstraction.** All LLM calls go through the Go `Evaluator` interface (defined in the `evaluation` package, where it is consumed). No Anthropic SDK types leak outside the `adapter/anthropic` package. Business logic depends on the interface, never on the vendor.
 2. **No AI-generated chart images.** For generated Task 1 charts, the AI returns **structured data** (see data design §5.1); the client renders it. Never ask the model for an image.
 3. **Repetition detection is deterministic.** Detect repeated lemmas in server code (not via the LLM). The LLM is only asked for synonym *suggestions*.
 4. **Never hand over a finished rewrite in MVP.** Output is suggestions + corrections only. The user rewrites in a revision field; the AI then scores the revision. Do not generate a full "model answer" essay for the user to copy.
@@ -104,22 +110,29 @@ Two top-level app folders: **`server/`** and **`client/`**. Keep them independen
 6. **Single-user, future-proofed.** No auth in MVP, but `user_id` exists (nullable) per the data design. Do not hard-delete the multi-user path.
 7. **Validate all AI output.** The model returns JSON; parse it into typed structs and validate (bands in range & 0.5 steps, required fields present) before persisting or returning. Never trust raw model output.
 8. **API contract is OpenAPI, code-first.** Every endpoint MUST carry swaggo annotations (summary, params, request DTO, every response + status). After adding or changing any endpoint, regenerate the spec (`make docs` / `go generate`). The client's request/response types are **generated** from that spec — never hand-write or hand-edit `client/src/lib/api/types.gen.ts`. A stale spec fails CI.
+9. **One-way feature dependencies.** A feature may import another only in one direction (e.g. `submission` → `evaluation`, never the reverse). No import cycles between features. Interfaces are defined in the consuming package; adapters import the feature to implement them.
 
 ## 4. Server conventions (`server/`)
 
 - **Language/framework:** Go + Fiber. REST, JSON.
-- **Layering (keep strict):**
-  - `handler/` — Fiber handlers: parse request, call service, map result/error to HTTP. No business logic. Swagger annotations live here, above each handler.
-  - `service/` — business logic & orchestration (repetition detection, calling the Evaluator, merging feedback, persistence orchestration).
-  - `repository/` — DB access (Postgres). SQL lives here only.
-  - `domain/` — entities & the `Evaluator` interface.
-  - `adapter/anthropic/` — the Claude implementation of `Evaluator`.
-- **API docs (Swagger / OpenAPI):** `swaggo/swag` generates the spec from handler annotations into `server/docs/`; `gofiber/swagger` serves the UI at `/swagger`. Regeneration is wired via `//go:generate swag init` and a `make docs` target. Treat `server/docs/` as generated output — never edit it by hand. See `docs/api-conventions.md`.
-- **Config:** environment variables only (12-factor). No secrets in code. Provide `.env.example`.
-- **DB:** PostgreSQL. Migrations in `server/migrations/` via a migration tool (`golang-migrate` or `goose`). Never edit an applied migration.
-- **Errors:** return typed errors from service layer; handlers translate to HTTP status + JSON error body `{ "error": { "code": "...", "message": "..." } }` (see api-conventions).
+- **Architecture — package-by-feature.** Each module under `internal/feature/<name>/` owns its full stack:
+  - `handler.go` — Fiber handlers: parse request, call service, map result/error to HTTP. No business logic. Swagger annotations live here, above each handler.
+  - `service.go` — business logic & orchestration.
+  - `repository.go` — DB access (Postgres). SQL lives here only.
+  - `dto.go` — API-facing request/response structs (json tags + used in swagger annotations).
+  - `model.go` — the clean domain entity.
+  - Shared infra (config, db pool, Fiber setup, health) lives in `internal/platform/`; the Claude client in `internal/adapter/anthropic/`.
+- **DTO / DAO separation.**
+  - **DTO (always):** never expose a domain entity or DB row directly to the client. API structs live in `dto.go` and are mapped to/from the domain model explicitly.
+  - **DAO / persistence struct (only when needed):** when the DB representation differs from the domain model (e.g. `jsonb` fields like `feedback`/`chart_data`, or nullable columns), use a dedicated persistence struct in `repository.go`. For simple entities, scan straight into the domain model — do not add a DAO just for symmetry.
+- **Constants.** Shared / cross-cutting constants live in `internal/constant/`, one file per topic (`health.go`, `apierror.go`, `enum.go`). The enum values from data-design (`task_type`, `chart_mode`, `prompt_source`) and API error codes belong here — single source of truth, no magic strings. Constants used in exactly one place may stay local to avoid a god-package and import cycles.
+- **Comments.** Exported identifiers get a concise one-line doc comment (Go/godoc convention). No narration of obvious code. Reserve longer comments for non-obvious logic or complex business rules.
+- **API docs (Swagger / OpenAPI):** `swaggo/swag` generates the spec from handler annotations into `server/docs/`; `gofiber/swagger` serves the UI at `/swagger`. Regeneration via `//go:generate swag init` + `make docs`. Treat `server/docs/` as generated output — never edit by hand. See `docs/api-conventions.md`.
+- **Config:** environment variables only (12-factor), via `internal/platform/config`. No secrets in code. Provide `.env.example`.
+- **DB:** PostgreSQL via `jackc/pgx` v5 + `pgxpool`. Migrations in `server/migrations/` via `golang-migrate`. Never edit an applied migration.
+- **Errors:** return typed errors from the service layer; handlers translate to HTTP status + JSON error body `{ "error": { "code": "...", "message": "..." } }` (codes in `constant/apierror.go`; see api-conventions).
 - **Context:** pass `context.Context` through service → repository → adapter (timeouts, cancellation on LLM calls).
-- **The `Evaluator` interface (shape to aim for):**
+- **The `Evaluator` interface (shape to aim for, lives in `feature/evaluation`):**
   ```go
   type Evaluator interface {
       Evaluate(ctx context.Context, in EvaluationInput) (EvaluationResult, error)
@@ -145,7 +158,9 @@ Two top-level app folders: **`server/`** and **`client/`**. Keep them independen
 
 ## 6. Testing expectations
 
-- **Server:** unit-test the service layer (repetition detection must have tests; AI calls are mocked via the `Evaluator` interface). Add integration tests for repository against a test Postgres.
+- **Unit tests are colocated** — `foo_test.go` sits next to `foo.go` in the same package (Go convention; enables white-box testing and `go test ./...`). Do not move unit tests into a separate folder.
+- **Integration / e2e tests** (need a real Postgres or a running server) live in `server/test/`.
+- **Server:** unit-test the service layer; the repetition detector must have tests; AI calls are mocked via the `Evaluator` interface. Repository integration tests run against a test Postgres.
 - **Client:** component tests for the critical interactive pieces (badges, correction rendering, revision flow).
 - Do not mock away the thing under test. The `Evaluator` interface exists partly to make the service testable without hitting the real API.
 
@@ -153,10 +168,10 @@ Two top-level app folders: **`server/`** and **`client/`**. Keep them independen
 
 A task is done when:
 1. It implements exactly what the referenced doc/ticket specifies — no more, no less.
-2. Code follows the layering and golden rules above.
+2. Code follows the architecture (package-by-feature), golden rules, and conventions above.
 3. AI output (if any) is parsed into typed structs and validated.
 4. Endpoints added/changed: swagger annotations present and the spec + client types regenerated.
-5. Tests for the new logic pass; existing tests still pass.
+5. Tests for the new logic pass (unit colocated); existing tests still pass.
 6. No secrets committed; new env vars added to `.env.example`.
 7. A short note in the PR describes *what* and *why* (the reviewer reads this first).
 
