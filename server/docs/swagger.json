@@ -1,0 +1,70 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "AI-powered IELTS Writing checker (Task 1 Academic and Task 2).",
+        "title": "WriteWisely API",
+        "contact": {},
+        "version": "0.1.0"
+    },
+    "basePath": "/api/v1",
+    "paths": {
+        "/health": {
+            "get": {
+                "description": "Reports API status and database connectivity. Returns 503 with db \"down\" when the database ping fails.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "Health check",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/server.HealthResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/server.HealthResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "server.HealthResponse": {
+            "type": "object",
+            "required": [
+                "db",
+                "status"
+            ],
+            "properties": {
+                "db": {
+                    "description": "Database connectivity: \"up\" or \"down\".",
+                    "type": "string",
+                    "enum": [
+                        "up",
+                        "down"
+                    ],
+                    "example": "up"
+                },
+                "status": {
+                    "description": "\"ok\" when every dependency is up, \"degraded\" otherwise.",
+                    "type": "string",
+                    "enum": [
+                        "ok",
+                        "degraded"
+                    ],
+                    "example": "ok"
+                }
+            }
+        }
+    }
+}
